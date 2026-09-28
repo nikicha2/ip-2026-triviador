@@ -1,8 +1,19 @@
 from django.urls import path
-from .views import CustomAuthToken
+
+from .views import (
+    CsrfView,
+    LoginView,
+    LogoutView,
+    MeView,
+    RegisterView,
+)
 
 app_name = 'auth_app'
 
 urlpatterns = [
-    path('login/', CustomAuthToken.as_view(), name='login'),
+    path('csrf/', CsrfView.as_view(), name='csrf'),
+    path('register/', RegisterView.as_view(), name='register'),
+    path('login/', LoginView.as_view(), name='login'),
+    path('logout/', LogoutView.as_view(), name='logout'),
+    path('me/', MeView.as_view(), name='me'),
 ]
