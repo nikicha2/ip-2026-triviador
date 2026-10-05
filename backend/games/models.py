@@ -1,35 +1,26 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
+from django.utils import timezone
 
 
 class Game(models.Model):
-    WAITING = 'waiting'
-    IN_PROGRESS = 'in_progress'
-    FINISHED = 'finished'
-    CANCELLED = 'cancelled'
+    class Status(models.TextChoices):
+        WAITING = 'waiting', 'Waiting'
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Completed'
 
-    STATUS_CHOICES = [
-        (WAITING, "Waiting"),
-        (IN_PROGRESS, "In Progress"),
-        (FINISHED, "Finished"),
-        (CANCELLED, "Cancelled"),
-    ]
+    WAITING = Status.WAITING
+    ACTIVE = Status.ACTIVE
+    COMPLETED = Status.COMPLETED
 
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name='created_games'
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(
         max_length=20,
-        choices=STATUS_CHOICES,
-        default=WAITING
+        choices=Status.choices,
+        default=Status.WAITING
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -37,60 +28,122 @@ class Game(models.Model):
     def __str__(self):
         return f'Game {self.pk} - {self.status}'
 
+    def get_current_round(self):
+        return self.rounds.order_by('-number').first()
 
-class GamePlayer(models.Model):
+    def is_active(self):
+        return self.status == self.Status.ACTIVE
+
+    def is_completed(self):
+        return self.status == self.Status.COMPLETED
+
+    @transaction.atomic
+    def start(self):
+        game = Game.objects.select_for_update().get(pk=self.pk)
+
+        if game.status != self.Status.WAITING:
+            raise ValidationError('A game can only start while waiting.')
+        if game.players.count() != 3:
+            raise ValidationError('A game must have exactly three players to start.')
+
+        game.status = self.Status.ACTIVE
+        game.save(update_fields=['status'])
+        return game
+
+
+class Player(models.Model):
+    class Color(models.TextChoices):
+        RED = 'red', 'Red'
+        GREEN = 'green', 'Green'
+        BLUE = 'blue', 'Blue'
+
+    RED = Color.RED
+    GREEN = Color.GREEN
+    BLUE = Color.BLUE
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+    )
     game = models.ForeignKey(
         Game,
         on_delete=models.CASCADE,
-        related_name='game_players',
+        related_name='players',
     )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name='game_players',
-    )
-    player_order = models.PositiveSmallIntegerField()
     score = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    joined_at = models.DateTimeField(auto_now_add=True)
+    color = models.CharField(
+        max_length=20,
+        choices=Color.choices,
+    )
 
     class Meta:
-        ordering = ['player_order']
         constraints = [
             models.UniqueConstraint(
-                fields=['game', 'user'],
-                name='unique_game_player_per_user_per_game',
+                fields=['user', 'game'],
+                name='unique_user_per_game',
             ),
             models.UniqueConstraint(
-                fields=['game', 'player_order'],
-                name='unique_player_order_per_game',
+                fields=['game', 'color'],
+                name='unique_color_per_game',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(score__gte=0),
+                name='player_score_gte_0',
             ),
         ]
 
     def __str__(self):
-        return f'{self.user} in {self.game}'
+        return f'{self.user} in game {self.game_id}'
+
+    def clean(self):
+        super().clean()
+
+        if self.game_id and self.game.status == Game.Status.COMPLETED:
+            raise ValidationError('Completed games cannot accept new players.')
+        if self.game_id and self.game.status != Game.Status.WAITING:
+            raise ValidationError('Players can only join waiting games.')
+        if self.score < 0:
+            raise ValidationError('Player score cannot be negative.')
+        if self.game_id and self.game.players.exclude(pk=self.pk).filter(user=self.user).exists():
+            raise ValidationError('A user can only join a game once.')
+        if self.game_id and self.game.players.exclude(pk=self.pk).filter(color=self.color).exists():
+            raise ValidationError('A color can only be used once per game.')
+        if self.game_id and self.game.players.count() >= 3 and self.pk is None:
+            raise ValidationError('A game can have at most three players.')
+
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.game_id is not None:
+            game = Game.objects.select_for_update().get(pk=self.game_id)
+            if game.status == Game.Status.COMPLETED:
+                raise ValidationError('Completed games cannot accept new players.')
+            if game.status != Game.Status.WAITING:
+                raise ValidationError('Players can only join waiting games.')
+            if game.players.count() >= 3:
+                raise ValidationError('A game can have at most three players.')
+        return super().save(*args, **kwargs)
 
 
 class Round(models.Model):
-    PENDING = 'pending'
-    OPEN = 'open'
-    CLOSED = 'closed'
-    EVALUATED = 'evaluated'
+    class Type(models.TextChoices):
+        CITY_CAPTURE = 'city_capture', 'City capture'
+        BATTLE = 'battle', 'Battle'
+        CAPITAL_ATTACK = 'capital_attack', 'Capital attack'
+        BONUS = 'bonus', 'Bonus'
 
-    ROUND_STATUS_CHOICES = [
-        (PENDING, 'Pending'),
-        (OPEN, 'Open'),
-        (CLOSED, 'Closed'),
-        (EVALUATED, 'Evaluated'),
-    ]
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Completed'
 
-    CHOICE = 'choice'
-    NUMERIC = 'numeric'
+    PENDING = Status.PENDING
+    ACTIVE = Status.ACTIVE
+    COMPLETED = Status.COMPLETED
 
-    QUESTION_TYPE_CHOICES = [
-        (CHOICE, 'Choice'),
-        (NUMERIC, 'Numeric'),
-    ]
+    CITY_CAPTURE = Type.CITY_CAPTURE
+    BATTLE = Type.BATTLE
+    CAPITAL_ATTACK = Type.CAPITAL_ATTACK
+    BONUS = Type.BONUS
 
     game = models.ForeignKey(
         Game,
@@ -98,31 +151,24 @@ class Round(models.Model):
         related_name='rounds',
     )
     number = models.PositiveIntegerField()
+    type = models.CharField(
+        max_length=30,
+        choices=Type.choices,
+    )
     status = models.CharField(
         max_length=20,
-        choices=ROUND_STATUS_CHOICES,
-        default=PENDING,
+        choices=Status.choices,
+        default=Status.PENDING,
     )
-    question_type = models.CharField(
-        max_length=20,
-        choices=QUESTION_TYPE_CHOICES,
-    )
-    choice_question = models.ForeignKey(
-        'questions.ChoiceQuestion',
-        on_delete=models.PROTECT,
+    winner = models.ForeignKey(
+        Player,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='rounds_as_choice_question',
+        related_name='won_rounds',
     )
-    numeric_question = models.ForeignKey(
-        'questions.NumericQuestion',
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name='rounds_as_numeric_question',
-    )
-    started_at = models.DateTimeField(null=True, blank=True)
-    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['number']
@@ -131,85 +177,74 @@ class Round(models.Model):
                 fields=['game', 'number'],
                 name='unique_round_number_per_game',
             ),
-            models.CheckConstraint(
-                condition=(
-                    Q(question_type='choice', choice_question__isnull=False, numeric_question__isnull=True)
-                    | Q(question_type='numeric', choice_question__isnull=True, numeric_question__isnull=False)
-                ),
-                name='round_question_reference_matches_type',
-            ),
-        ]
-
-    def clean(self):
-        super().clean()
-
-        if self.choice_question_id is not None and self.numeric_question_id is not None:
-            raise ValidationError('A round cannot reference both a choice and numeric question.')
-        if self.choice_question_id is None and self.numeric_question_id is None:
-            raise ValidationError('A round must reference exactly one question.')
-
-        if self.question_type == self.CHOICE:
-            if self.choice_question_id is None or self.numeric_question_id is not None:
-                raise ValidationError('Choice rounds must reference a choice question and no numeric question.')
-        elif self.question_type == self.NUMERIC:
-            if self.numeric_question_id is None or self.choice_question_id is not None:
-                raise ValidationError('Numeric rounds must reference a numeric question and no choice question.')
-
-    def __str__(self):
-        return f'Round {self.number} ({self.get_question_type_display()})'
-
-
-class RoundAnswer(models.Model):
-    round = models.ForeignKey(
-        Round,
-        on_delete=models.CASCADE,
-        related_name='answers',
-    )
-    player = models.ForeignKey(
-        GamePlayer,
-        on_delete=models.CASCADE,
-        related_name='answers',
-    )
-    selected_option = models.ForeignKey(
-        'questions.AnswerOption',
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name='round_answers',
-    )
-    numeric_value = models.IntegerField(null=True, blank=True)
-    is_correct = models.BooleanField(null=True, blank=True)
-    points_awarded = models.IntegerField(default=0)
-    submitted_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ['submitted_at']
-        constraints = [
             models.UniqueConstraint(
-                fields=['round', 'player'],
-                name='unique_round_answer_per_player',
-            ),
-            models.CheckConstraint(
-                condition=~Q(selected_option__isnull=False, numeric_value__isnull=False),
-                name='roundanswer_not_both_selected_option_and_numeric_value',
+                fields=['game'],
+                condition=models.Q(status='active'),
+                name='unique_active_round_per_game',
             ),
         ]
+
+    def __str__(self):
+        return f'Round {self.number} ({self.type})'
 
     def clean(self):
         super().clean()
 
-        if self.round_id and self.player_id and self.player.game_id != self.round.game_id:
-            raise ValidationError('A player cannot answer a round from a different game.')
+        if self.game_id and self.game.status == Game.Status.COMPLETED:
+            raise ValidationError('Completed games cannot receive new rounds.')
+        if self.game_id and self.status == self.Status.ACTIVE and self.game.status != Game.Status.ACTIVE:
+            raise ValidationError('Only active games can have active rounds.')
+        if self.winner_id is not None and self.winner.game_id != self.game_id:
+            raise ValidationError('A round winner must belong to the same game.')
 
-        if self.selected_option_id is not None and self.numeric_value is not None:
-            raise ValidationError('An answer cannot include both a selected option and a numeric value.')
+        if self.status == self.Status.PENDING:
+            if self.winner_id is not None or self.completed_at is not None:
+                raise ValidationError('Pending rounds cannot have a winner or completion timestamp.')
+        if self.status == self.Status.COMPLETED:
+            if self.winner_id is None or self.completed_at is None:
+                raise ValidationError('Completed rounds must have a winner and a completion timestamp.')
 
-        if self.round_id and self.round.question_type == Round.CHOICE:
-            if self.selected_option_id is None and self.numeric_value is not None:
-                raise ValidationError('Choice questions require a selected option, not a numeric value.')
-        if self.round_id and self.round.question_type == Round.NUMERIC:
-            if self.numeric_value is None and self.selected_option_id is not None:
-                raise ValidationError('Numeric questions require a numeric answer, not a selected option.')
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.game_id is not None:
+            game = Game.objects.select_for_update().get(pk=self.game_id)
+            if game.status != Game.Status.ACTIVE:
+                raise ValidationError('New rounds can only be created for active games.')
+            if game.rounds.filter(status=self.Status.ACTIVE).exclude(pk=self.pk).exists():
+                raise ValidationError('A game can have at most one active round.')
+        return super().save(*args, **kwargs)
 
-    def __str__(self):
-        return f'Answer for Round {self.round.number} by {self.player.user}'
+    @transaction.atomic
+    def activate(self):
+        round_obj = Round.objects.select_for_update().get(pk=self.pk)
+
+        if round_obj.game.status != Game.Status.ACTIVE:
+            raise ValidationError('Only active games can host active rounds.')
+        if round_obj.status != self.Status.PENDING:
+            raise ValidationError('Only pending rounds can be activated.')
+        if round_obj.game.rounds.filter(status=self.Status.ACTIVE).exclude(pk=round_obj.pk).exists():
+            raise ValidationError('A game already has an active round.')
+
+        round_obj.status = self.Status.ACTIVE
+        round_obj.winner = None
+        round_obj.completed_at = None
+        round_obj.save(update_fields=['status', 'winner', 'completed_at'])
+        return round_obj
+
+    @transaction.atomic
+    def complete(self, winner):
+        round_obj = Round.objects.select_for_update().get(pk=self.pk)
+
+        if round_obj.status != self.Status.ACTIVE:
+            raise ValidationError('Only active rounds can be completed.')
+        if not isinstance(winner, Player):
+            raise ValidationError('The winner must be a player instance.')
+        if winner.game_id != round_obj.game_id:
+            raise ValidationError('The winner must belong to the same game.')
+
+        round_obj.status = self.Status.COMPLETED
+        round_obj.winner = winner
+        round_obj.completed_at = timezone.now()
+        round_obj.full_clean()
+        round_obj.save(update_fields=['status', 'winner', 'completed_at'])
+        return round_obj
