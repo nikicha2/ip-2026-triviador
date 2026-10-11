@@ -150,6 +150,30 @@ class Round(models.Model):
         on_delete=models.CASCADE,
         related_name='rounds',
     )
+    QUESTION_TYPE_CHOICES = [
+        ('choice', 'Choice'),
+        ('numeric', 'Numeric'),
+    ]
+    question_type = models.CharField(
+        max_length=20,
+        choices=QUESTION_TYPE_CHOICES,
+        null=True,
+        blank=True,
+    )
+    choice_question = models.ForeignKey(
+        'questions.ChoiceQuestion',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='rounds_as_choice_question',
+    )
+    numeric_question = models.ForeignKey(
+        'questions.NumericQuestion',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='rounds_as_numeric_question',
+    )
     number = models.PositiveIntegerField()
     type = models.CharField(
         max_length=30,
@@ -176,6 +200,13 @@ class Round(models.Model):
             models.UniqueConstraint(
                 fields=['game', 'number'],
                 name='unique_round_number_per_game',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(models.Q(choice_question__isnull=False, numeric_question__isnull=True, question_type='choice')) |
+                    models.Q(models.Q(choice_question__isnull=True, numeric_question__isnull=False, question_type='numeric'))
+                ),
+                name='round_question_reference_matches_type',
             ),
             models.UniqueConstraint(
                 fields=['game'],
