@@ -50,6 +50,47 @@ class Game(models.Model):
         game.save(update_fields=['status'])
         return game
 
+    def initialize(self, random_selector=None):
+        """
+        Explicitly initialize the game by creating territories and capitals.
+        
+        This is a separate, explicit operation that must be called to set up
+        the game. It is not automatic and must not run during game creation
+        or status transitions.
+        
+        Preconditions:
+        - Game exists and has status 'waiting'
+        - Game has exactly 3 players
+        - Game has no territories or capitals yet
+        - Map definition is valid
+        
+        On success:
+        - Creates all 18 territories with score = 0, owner = None
+        - Establishes neighbor relationships from M04 map
+        - Assigns one capital to each player
+        - Sets capital territories' owner to their player
+        - All capitals start with health = 3
+        - Game status transitions to 'active'
+        
+        On failure (precondition or validation error):
+        - All changes are rolled back, database unchanged
+        - Exception is raised with clear error message
+        
+        Args:
+            random_selector: Optional callable for capital selection (test use only).
+                           If provided, should accept a list and return one element.
+                           Defaults to random.choice() if None.
+        
+        Returns:
+            The initialized game with status = 'active'.
+            
+        Raises:
+            ValidationError: If any precondition fails or initialization fails.
+        """
+        from games.services.initializer import GameInitializer
+        
+        return GameInitializer.initialize(self, random_selector)
+
 
 class Player(models.Model):
     class Color(models.TextChoices):
