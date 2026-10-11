@@ -202,7 +202,8 @@ class Round(models.Model):
                 name='unique_round_number_per_game',
             ),
             models.CheckConstraint(
-                check=(
+                condition=(
+                    models.Q(choice_question__isnull=True, numeric_question__isnull=True, question_type__isnull=True) |
                     models.Q(models.Q(choice_question__isnull=False, numeric_question__isnull=True, question_type='choice')) |
                     models.Q(models.Q(choice_question__isnull=True, numeric_question__isnull=False, question_type='numeric'))
                 ),
@@ -279,3 +280,157 @@ class Round(models.Model):
         round_obj.full_clean()
         round_obj.save(update_fields=['status', 'winner', 'completed_at'])
         return round_obj
+
+
+class Territory(models.Model):
+    """
+    Represents a territory in a game, belonging to the project-wide map.
+    
+    Each game has its own set of Territory records conforming to the fixed
+    project map definition. A territory can be owned by a player and has a score.
+    Territories are connected via a many-to-many adjacency relationship.
+    """
+    
+    game = models.ForeignKey(
+        Game,
+        on_delete=models.CASCADE,
+        related_name='territories',
+    )
+    name = models.CharField(max_length=100)
+    slug = models.CharField(max_length=50)
+    owner = models.ForeignKey(
+        Player,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='owned_territories',
+    )
+    neighbors = models.ManyToManyField(
+        'self',
+        symmetrical=True,
+    )
+    score = models.IntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['game', 'name'],
+                name='unique_territory_name_per_game',
+            ),
+            models.UniqueConstraint(
+                fields=['game', 'slug'],
+                name='unique_territory_slug_per_game',
+            ),
+            models.CheckConstraint(
+                condition=Q(score__gte=0),
+                name='territory_score_gte_0',
+            ),
+        ]
+        ordering = ['game', 'slug']
+
+    def __str__(self):
+        return f'{self.name} (Game {self.game_id})'
+
+    def clean(self):
+        super().clean()
+        
+        # Validate owner belongs to the same game
+        if self.owner_id is not None and self.owner.game_id != self.game_id:
+            raise ValidationError(
+                'Territory owner must belong to the same game.'
+            )
+        
+        # Validate score is non-negative
+        if self.score < 0:
+            raise ValidationError('Territory score cannot be negative.')
+    
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        # Always validate before saving
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class Capital(models.Model):
+    """
+    Represents a player's capital territory with health points.
+    
+    A capital is a special territory that serves as a player's stronghold.
+    Each player can have at most one capital, and each territory can have
+    at most one capital. Health ranges from 0 to 3.
+    """
+    
+    territory = models.OneToOneField(
+        Territory,
+        on_delete=models.CASCADE,
+        related_name='capital',
+    )
+    player = models.OneToOneField(
+        Player,
+        on_delete=models.CASCADE,
+        related_name='capital',
+    )
+    health = models.IntegerField(default=3)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(health__gte=0) & Q(health__lte=3),
+                name='capital_health_range_0_to_3',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Capital: {self.player} at {self.territory}'
+
+    def clean(self):
+        super().clean()
+        
+        # Validate health is in range 0-3
+        if self.health < 0 or self.health > 3:
+            raise ValidationError(
+                'Capital health must be between 0 and 3 (inclusive).'
+            )
+        
+        # Validate player and territory belong to the same game
+        if (self.territory_id is not None and 
+            self.player_id is not None and
+            self.territory.game_id != self.player.game_id):
+            raise ValidationError(
+                'Capital territory and player must belong to the same game.'
+            )
+        
+        # Validate territory's owner is the same player
+        if (self.territory_id is not None and 
+            self.player_id is not None and
+            self.territory.owner_id != self.player_id):
+            raise ValidationError(
+                'Territory must be owned by the capital player.'
+            )
+        
+        # Validate player doesn't already have another capital
+        if self.player_id is not None:
+            existing_capital = Capital.objects.filter(
+                player_id=self.player_id
+            ).exclude(pk=self.pk).first()
+            if existing_capital is not None:
+                raise ValidationError(
+                    f'Player {self.player} already has a capital at {existing_capital.territory}.'
+                )
+        
+        # Validate territory doesn't already have another capital
+        if self.territory_id is not None:
+            existing_capital = Capital.objects.filter(
+                territory_id=self.territory_id
+            ).exclude(pk=self.pk).first()
+            if existing_capital is not None:
+                raise ValidationError(
+                    f'Territory {self.territory} already has a capital '
+                    f'for player {existing_capital.player}.'
+                )
+    
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        # Always validate before saving
+        self.full_clean()
+        return super().save(*args, **kwargs)
