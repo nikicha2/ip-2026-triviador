@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.core.exceptions import ValidationError
 
-from .models import Game, Player, Round, Territory, Capital
+from .models import Game, Player, Round, Territory, Capital, WaitingRoom
 
 
 @admin.register(Game)
@@ -107,3 +107,14 @@ class CapitalAdmin(admin.ModelAdmin):
         """Save with validation."""
         self.clean_model(obj)
         super().save_model(request, obj, form, change)
+
+@admin.register(WaitingRoom)
+class WaitingRoomAdmin(admin.ModelAdmin):
+    list_display = ('id', 'game', 'is_active', 'waiting_count', 'created_at')
+    list_filter = ('is_active',)
+    list_select_related = ('game',)
+    filter_horizontal = ('waiting',)
+
+    @admin.display(description='Waiting')
+    def waiting_count(self, obj):
+        return obj.waiting.count()

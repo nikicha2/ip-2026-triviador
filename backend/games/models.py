@@ -475,3 +475,38 @@ class Capital(models.Model):
         # Always validate before saving
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class WaitingRoom(models.Model):
+    game = models.OneToOneField(
+        Game,
+        on_delete=models.CASCADE,
+        related_name='waiting_room',
+    )
+    waiting = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name='waiting_rooms',
+        blank=True,
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['is_active'],
+                condition=models.Q(is_active=True),
+                name='unique_active_waiting_room',
+            ),
+        ]
+
+    def __str__(self):
+        return f'WaitingRoom {self.pk} (game {self.game_id}, active={self.is_active})'
+
+    def clean(self):
+        super().clean()
+        if self.game_id and self.game.status != Game.Status.WAITING:
+            raise ValidationError(
+                'Waiting rooms can only be linked to games in waiting status.'
+            )

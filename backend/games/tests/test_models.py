@@ -3,3 +3,4 @@ from .test_players import *
 from .test_rounds import *
 from .test_territories import *
 from .test_initialization import *
+from .test_waiting_room import *
